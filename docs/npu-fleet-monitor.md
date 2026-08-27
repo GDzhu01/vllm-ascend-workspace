@@ -15,7 +15,7 @@ python3 .agents/skills/npu-fleet-monitor/scripts/manage_monitor.py ensure
 1. 首次使用时从已配置的 Git 远端获取 `vaws-top`，然后复用对应 worktree；若不存在，则创建到 `~/vaws-worktrees/<仓库名>/npu-fleet-monitor`。
 2. 确认监控 worktree 没有未提交的源码修改；被项目忽略的运行时数据不受影响。
 3. 提交变化时执行 `npm ci`、后端测试和生产构建；相同提交和完整构建会直接复用。
-4. 安装、启用并重启 `npu-fleet-monitor.service` 用户服务。
+4. 安装、启用并重启平台用户服务：Linux 使用 `npu-fleet-monitor.service`，Windows 使用当前用户 `HKCU Run` 自动启动项和隐藏 supervisor。
 5. 绕过系统 HTTP 代理检查 `http://127.0.0.1:8789/api/health`，最终只在标准输出打印一条 JSON 结果。
 
 浏览器入口为 <http://127.0.0.1:8788>。Web 和 API 均固定在回环地址，不提供用户登录，也不应通过端口转发或反向代理对外开放。
@@ -36,11 +36,13 @@ python3 .agents/skills/npu-fleet-monitor/scripts/manage_monitor.py restart
 python3 .agents/skills/npu-fleet-monitor/scripts/manage_monitor.py stop
 ```
 
-直接查看服务日志：
+Linux 直接查看服务日志：
 
 ```bash
 systemctl --user status npu-fleet-monitor.service
 journalctl --user -u npu-fleet-monitor.service -f
 ```
+
+Windows 可从 `status` 返回的 `service.LogFile` 查看日志。该服务无需管理员权限，关闭终端后继续运行，并在用户下次登录时自动启动；`stop` 只停止当前进程，保留自动启动配置，`restart` 会重启隐藏 supervisor。
 
 首次执行和涉及 systemd/OpenSSH 的操作应在宿主执行面运行。需要新增、修复或移除远程服务器时使用 `machine-management`，监控服务本身不创建远程容器、不启动任务，也不占用 NPU lease。

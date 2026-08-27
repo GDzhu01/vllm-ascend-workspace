@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
+import os
 import subprocess
 import sys
 import time
@@ -15,6 +17,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_BRANCH = "vaws-top"
 DEFAULT_URL = "http://127.0.0.1:8789/api/health"
+WINDOWS_RUN_NAME = "NpuFleetMonitor"
 
 
 class MonitorError(RuntimeError):
@@ -39,6 +42,8 @@ def run(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if relay:
@@ -160,11 +165,12 @@ def build_if_needed(worktree: Path, commit: str) -> bool:
         raise MonitorError(f"Node.js 22+ is required, found {version}")
 
     progress("Installing locked frontend dependencies")
-    run(["npm", "ci"], cwd=worktree, relay=True)
+    npm = "npm.cmd" if os.name == "nt" else "npm"
+    run([npm, "ci"], cwd=worktree, relay=True)
     progress("Running backend tests")
-    run(["npm", "run", "test:backend"], cwd=worktree, relay=True)
+    run([npm, "run", "test:backend"], cwd=worktree, relay=True)
     progress("Building the production dashboard")
-    run(["npm", "run", "build"], cwd=worktree, relay=True)
+    run([npm, "run", "build"], cwd=worktree, relay=True)
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(commit + "\n", encoding="utf-8")
     return True
@@ -185,6 +191,150 @@ def systemd_properties() -> dict[str, str]:
     return values
 
 
+def windows_pid_file(worktree: Path) -> Path:
+    return worktree / "data" / "npu-fleet-monitor.pid.json"
+
+
+def windows_log_file(worktree: Path) -> Path:
+    return worktree / "data" / "npu-fleet-monitor.log"
+
+
+def windows_pythonw() -> Path:
+    candidate = Path(sys.executable).with_name("pythonw.exe")
+    return candidate if candidate.is_file() else Path(sys.executable)
+
+
+def windows_python() -> Path:
+    candidate = Path(sys.executable).with_name("python.exe")
+    return candidate if candidate.is_file() else Path(sys.executable)
+
+
+def windows_service_command(worktree: Path) -> list[str]:
+    return [
+        str(windows_pythonw()), str(Path(__file__).resolve()), "_windows_service",
+        "--worktree", str(worktree),
+    ]
+
+
+def windows_pid(worktree: Path) -> int | None:
+    try:
+        payload = json.loads(windows_pid_file(worktree).read_text(encoding="utf-8"))
+        return int(payload["pid"])
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def windows_pid_alive(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return False
+    process_query_limited_information = 0x1000
+    handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return False
+    ctypes.windll.kernel32.CloseHandle(handle)
+    return True
+
+
+def windows_run_value() -> str | None:
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+            value, _ = winreg.QueryValueEx(key, WINDOWS_RUN_NAME)
+            return str(value)
+    except FileNotFoundError:
+        return None
+
+
+def windows_set_autostart(worktree: Path) -> None:
+    import winreg
+    command = subprocess.list2cmdline(windows_service_command(worktree))
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+        winreg.SetValueEx(key, WINDOWS_RUN_NAME, 0, winreg.REG_SZ, command)
+
+
+def windows_service_properties(worktree: Path) -> dict[str, str]:
+    pid = windows_pid(worktree)
+    active = windows_pid_alive(pid)
+    enabled = windows_run_value() == subprocess.list2cmdline(windows_service_command(worktree))
+    return {
+        "ActiveState": "active" if active else "inactive",
+        "SubState": "running" if active else "dead",
+        "UnitFileState": "enabled" if enabled else "disabled",
+        "Manager": "windows-hkcu-run",
+        "MainPID": str(pid or 0),
+        "LogFile": str(windows_log_file(worktree)),
+    }
+
+
+def windows_stop(worktree: Path) -> None:
+    pid = windows_pid(worktree)
+    if windows_pid_alive(pid):
+        run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False)
+        deadline = time.monotonic() + 10
+        while windows_pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.2)
+
+
+def windows_start(worktree: Path) -> None:
+    if windows_pid_alive(windows_pid(worktree)):
+        return
+    worktree.joinpath("data").mkdir(parents=True, exist_ok=True)
+    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    subprocess.Popen(
+        windows_service_command(worktree), cwd=worktree,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        close_fds=True, creationflags=flags,
+    )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if windows_pid_alive(windows_pid(worktree)):
+            return
+        time.sleep(0.2)
+    raise MonitorError("Windows monitor supervisor did not start")
+
+
+def windows_install_and_restart(worktree: Path) -> None:
+    progress("Installing the Windows per-user startup service")
+    windows_set_autostart(worktree)
+    windows_stop(worktree)
+    windows_start(worktree)
+
+
+def windows_service_main(worktree: Path) -> int:
+    pid_file = windows_pid_file(worktree)
+    existing = windows_pid(worktree)
+    if windows_pid_alive(existing) and existing != os.getpid():
+        return 0
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(json.dumps({"pid": os.getpid(), "started_at": int(time.time())}) + "\n", encoding="utf-8")
+    env = os.environ.copy()
+    env["NFM_SOURCE_WORKSPACE"] = str(REPO_ROOT)
+    flags = subprocess.CREATE_NO_WINDOW
+    try:
+        with windows_log_file(worktree).open("a", encoding="utf-8") as log:
+            while True:
+                log.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] starting supervisor\n")
+                log.flush()
+                child = subprocess.Popen(
+                    [str(windows_python()), "-u", str(worktree / "scripts" / "supervisor.py")],
+                    cwd=worktree, env=env, stdin=subprocess.DEVNULL,
+                    stdout=log, stderr=subprocess.STDOUT, creationflags=flags,
+                )
+                child.wait()
+                log.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] supervisor exited with {child.returncode}; restarting in 5s\n")
+                log.flush()
+                time.sleep(5)
+    finally:
+        if windows_pid(worktree) == os.getpid():
+            pid_file.unlink(missing_ok=True)
+
+
+def service_properties(worktree: Path | None) -> dict[str, str]:
+    if os.name == "nt":
+        return windows_service_properties(worktree) if worktree else {"ActiveState": "inactive", "SubState": "dead"}
+    return systemd_properties()
+
+
 def health(wait_seconds: float = 0) -> tuple[bool, dict[str, Any] | None, str | None]:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     deadline = time.monotonic() + wait_seconds
@@ -202,6 +352,9 @@ def health(wait_seconds: float = 0) -> tuple[bool, dict[str, Any] | None, str | 
 
 
 def install_and_restart(worktree: Path) -> None:
+    if os.name == "nt":
+        windows_install_and_restart(worktree)
+        return
     progress("Installing and enabling the user service")
     run([str(worktree / "scripts/install-user-service.sh")], cwd=worktree, relay=True)
     run(["systemctl", "--user", "restart", "npu-fleet-monitor.service"])
@@ -215,7 +368,7 @@ def payload_for(action: str, branch: str, worktree: Path | None, commit: str | N
         "branch": branch,
         "commit": commit,
         "worktree": str(worktree) if worktree else None,
-        "service": systemd_properties(),
+        "service": service_properties(worktree),
         "url": "http://127.0.0.1:8788",
         "health": health_payload,
         "health_error": health_error,
@@ -225,16 +378,30 @@ def payload_for(action: str, branch: str, worktree: Path | None, commit: str | N
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Deploy and operate the local NPU fleet monitor")
-    parser.add_argument("action", choices=("ensure", "status", "restart", "stop"))
+    parser.add_argument("action", choices=("ensure", "status", "restart", "stop", "_windows_service"))
     parser.add_argument("--branch", default=DEFAULT_BRANCH)
     parser.add_argument("--worktree", type=Path)
     args = parser.parse_args()
+
+    if args.action == "_windows_service":
+        if os.name != "nt" or args.worktree is None:
+            return 2
+        return windows_service_main(args.worktree.resolve())
 
     try:
         worktree = resolve_worktree(args.branch, args.worktree, create=args.action == "ensure")
         commit = validate_project(worktree, args.branch)
         if args.action == "ensure":
-            built = build_if_needed(worktree, commit)
+            was_active = os.name == "nt" and windows_pid_alive(windows_pid(worktree))
+            if was_active:
+                progress("Stopping the Windows service before reconciling locked build artifacts")
+                windows_stop(worktree)
+            try:
+                built = build_if_needed(worktree, commit)
+            except Exception:
+                if was_active:
+                    windows_start(worktree)
+                raise
             install_and_restart(worktree)
             ok, health_payload, health_error = health(wait_seconds=30)
             result = {
@@ -243,19 +410,26 @@ def main() -> int:
                 "branch": args.branch,
                 "commit": commit,
                 "worktree": str(worktree),
-                "service": systemd_properties(),
+                "service": service_properties(worktree),
                 "url": "http://127.0.0.1:8788",
                 "health": health_payload,
                 "health_error": health_error,
                 "built": built,
             }
         elif args.action == "restart":
-            run(["systemctl", "--user", "restart", "npu-fleet-monitor.service"])
+            if os.name == "nt":
+                windows_stop(worktree)
+                windows_start(worktree)
+            else:
+                run(["systemctl", "--user", "restart", "npu-fleet-monitor.service"])
             ok, health_payload, health_error = health(wait_seconds=30)
             result = payload_for(args.action, args.branch, worktree, commit, None)
             result.update({"ok": ok, "health": health_payload, "health_error": health_error})
         elif args.action == "stop":
-            run(["systemctl", "--user", "stop", "npu-fleet-monitor.service"])
+            if os.name == "nt":
+                windows_stop(worktree)
+            else:
+                run(["systemctl", "--user", "stop", "npu-fleet-monitor.service"])
             result = payload_for(args.action, args.branch, worktree, commit, None)
             result["ok"] = result["service"].get("ActiveState") == "inactive"
         else:

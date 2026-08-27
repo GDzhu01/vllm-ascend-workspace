@@ -11,7 +11,7 @@ Operate the local monitoring dashboard without mixing its standalone project his
 
 - Keep application source on the standalone `vaws-top` branch; retain its independent project history.
 - Reuse an existing clean worktree attached to that branch. The helper creates the default independent worktree only when none exists.
-- Run the public helper outside the filesystem sandbox from its first call. It invokes the user systemd manager and starts a service that uses OpenSSH to probe managed hosts.
+- Run the public helper outside the filesystem sandbox from its first call. On Linux it invokes the user systemd manager; on Windows it installs an HKCU per-user startup supervisor. Both start a service that uses OpenSSH to probe managed hosts.
 - Keep the web and API listeners on `127.0.0.1`. This service has no web login and is intended only for the local machine.
 - Preserve the worktree's ignored `data/` directory across rebuilds. It contains historical SQLite data, a monitor-specific SSH key, and `known_hosts`; never print, stage, or copy those secrets into tracked files.
 - Reuse the workspace machine inventory and device-management utilities. Use `machine-management` separately when the inventory itself needs to change.
@@ -25,7 +25,7 @@ Deploy or reconcile the service:
 python3 .agents/skills/npu-fleet-monitor/scripts/manage_monitor.py ensure
 ```
 
-The helper fetches `vaws-top` from a configured remote when needed, finds or creates its worktree, validates a clean source tree, runs the locked build and backend tests when the commit changed, installs the user unit, restarts it, and waits for `/api/health`.
+The helper fetches `vaws-top` from a configured remote when needed, finds or creates its worktree, validates a clean source tree, runs the locked build and backend tests when the commit changed, installs the platform service, restarts it, and waits for `/api/health`.
 
 Inspect, restart, or stop it:
 
@@ -41,4 +41,4 @@ Read [references/acceptance.md](references/acceptance.md) when validating a depl
 
 ## Result
 
-Report the source branch and commit, worktree path, unit state, local URL, health result, and whether a build ran. On success the enabled user unit survives terminal closure; browser activity controls 1/5/10/30-second sampling, while no active page returns the collector to its low-frequency interval.
+Report the source branch and commit, worktree path, service manager/state, local URL, health result, and whether a build ran. On success the enabled user service survives terminal closure and starts again at Linux user-manager startup or Windows sign-in; browser activity controls 1/5/10/30-second sampling, while no active page returns the collector to its low-frequency interval.
