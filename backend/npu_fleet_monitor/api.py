@@ -129,6 +129,24 @@ class Handler(BaseHTTPRequestHandler):
                 "range": range_name, "bucket_seconds": bucket,
                 "points": self.app.db.history(server_id, int(time.time()) - seconds, bucket),
             })
+        if parsed.path == "/api/history/heatmap":
+            query = parse_qs(parsed.query)
+            range_name = query.get("range", ["7d"])[0]
+            seconds, _ = RANGES.get(range_name, RANGES["7d"])
+            server_id = query.get("server_id", [None])[0]
+            if not server_id:
+                return self.json_response({"error": "server_id is required"}, HTTPStatus.BAD_REQUEST)
+            try:
+                timezone_offset = int(query.get("timezone_offset", ["0"])[0])
+            except ValueError:
+                return self.json_response({"error": "timezone_offset must be an integer"}, HTTPStatus.BAD_REQUEST)
+            return self.json_response({
+                "range": range_name,
+                "bucket_seconds": 7200,
+                "points": self.app.db.history_heatmap(
+                    server_id, int(time.time()) - seconds, 7200, timezone_offset,
+                ),
+            })
         return self._static(parsed.path)
 
     def do_POST(self) -> None:  # noqa: N802

@@ -207,6 +207,60 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def history_heatmap(
+        self,
+        server_id: str,
+        since: int,
+        bucket_seconds: int = 7200,
+        timezone_offset_seconds: int = 0,
+    ) -> list[dict[str, Any]]:
+        offset = max(-50400, min(50400, int(timezone_offset_seconds)))
+        bucket = max(3600, int(bucket_seconds))
+        bucket_expression = "((collected_at + ?) / ?) * ? - ?"
+        summary_rows = self.connection().execute(
+            f"""
+            SELECT {bucket_expression} AS bucket,
+                   COUNT(*) AS sample_count,
+                   AVG(cpu_percent) AS cpu_percent,
+                   AVG(npu_util_percent) AS npu_util_percent,
+                   AVG(CASE WHEN memory_total_bytes > 0 THEN memory_used_bytes * 100.0 / memory_total_bytes END) AS memory_percent,
+                   AVG(CASE WHEN hbm_total_mb > 0 THEN hbm_used_mb * 100.0 / hbm_total_mb END) AS hbm_percent,
+                   MAX(disk_max_percent) AS disk_max_percent
+            FROM host_samples
+            WHERE server_id = ? AND collected_at >= ?
+            GROUP BY bucket ORDER BY bucket
+            """,
+            (offset, bucket, bucket, offset, server_id, since),
+        ).fetchall()
+        points = {int(row["bucket"]): {**dict(row), "devices": []} for row in summary_rows}
+        if not points:
+            return []
+
+        device_rows = self.connection().execute(
+            f"""
+            SELECT {bucket_expression} AS bucket,
+                   CAST(json_extract(device.value, '$.npu_id') AS INTEGER) AS npu_id,
+                   MAX(COALESCE(json_extract(device.value, '$.name'), 'Ascend NPU')) AS name,
+                   AVG(CAST(json_extract(device.value, '$.aicore_percent') AS REAL)) AS utilization_percent,
+                   AVG(CASE
+                       WHEN CAST(json_extract(device.value, '$.hbm.total_mb') AS REAL) > 0
+                       THEN CAST(json_extract(device.value, '$.hbm.used_mb') AS REAL) * 100.0 /
+                            CAST(json_extract(device.value, '$.hbm.total_mb') AS REAL)
+                   END) AS hbm_percent,
+                   AVG(CASE WHEN json_extract(device.value, '$.busy') THEN 100.0 ELSE 0.0 END) AS busy_percent
+            FROM host_samples
+            JOIN json_each(host_samples.payload_json, '$.devices') AS device
+            WHERE server_id = ? AND collected_at >= ?
+            GROUP BY bucket, npu_id ORDER BY bucket, npu_id
+            """,
+            (offset, bucket, bucket, offset, server_id, since),
+        ).fetchall()
+        for row in device_rows:
+            point = points.get(int(row["bucket"]))
+            if point is not None:
+                point["devices"].append({key: row[key] for key in row.keys() if key != "bucket"})
+        return [points[key] for key in sorted(points)]
+
     def latest_persisted(self) -> dict[str, int]:
         rows = self.connection().execute(
             "SELECT server_id, MAX(collected_at) AS collected_at FROM host_samples GROUP BY server_id"

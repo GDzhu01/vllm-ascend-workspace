@@ -29,6 +29,6 @@ Each cycle is non-overlapping: a new cycle is scheduled only after the previous 
 
 ## Persistence
 
-SQLite runs in WAL mode. The primary history index is `(server_id, collected_at DESC)`, matching server-range reports, with a second time index for retention cleanup and fleet reports. Detailed snapshots are stored as JSON alongside summary columns used by aggregate queries.
+SQLite runs in WAL mode. The primary history index is `(server_id, collected_at DESC)`, matching server-range reports, with a second time index for retention cleanup and fleet reports. Detailed snapshots are stored as JSON alongside summary columns used by aggregate queries. The heatmap endpoint groups summary columns and `payload_json.devices` with SQLite JSON functions into timezone-aligned two-hour buckets, so the UI can render both server-level and per-NPU activity without loading raw samples into the browser.
 
 Passwords are deliberately absent from every schema. The API accepts them only for the duration of a batch request and passes one candidate at a time to the workspace bootstrap entrypoint through stdin.
