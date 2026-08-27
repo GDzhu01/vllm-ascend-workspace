@@ -660,7 +660,7 @@ def write_askpass_helper(temp_dir: pathlib.Path, env_name: str) -> pathlib.Path:
         helper_py = temp_dir / "askpass.py"
         helper_py.write_text(
             "import os, sys\n"
-            f"sys.stdout.write(os.environ.get({env_name!r}, '') + '\n')\n",
+            f"sys.stdout.write(os.environ.get({env_name!r}, '') + '\\n')\n",
             encoding="utf-8",
         )
         helper = temp_dir / "askpass.cmd"
@@ -779,6 +779,10 @@ def run_remote_script(
         ) from exc
 
     assert proc.stdin is not None
+    # Remote scripts must use Unix line endings. Text-mode pipes otherwise
+    # translate ``\n`` to CRLF on Windows, which breaks bash tokens such as
+    # ``set -euo pipefail``.
+    proc.stdin.reconfigure(newline="\n")
     proc.stdin.write(script)
     proc.stdin.close()
 
