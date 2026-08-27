@@ -19,6 +19,8 @@ Bare-metal NPU hosts
   └─ docker ps + docker info
 ```
 
+At startup, inventory discovery merges the active machine inventory with the workspace's complete host pool. Active records provide aliases and hardware tags. Addresses found only in the complete pool are still inserted and probed, but receive the derived `低优先级` tag. Only the first address field of each complete-pool line is parsed; adjacent authentication fields never enter application state. User-defined tags are stored in the existing `servers.tags_json` column and the derived priority tag is reconciled on each service start.
+
 ## Collection tiers
 
 Fast collection reads CPU counters, load, memory and NPU state. CPU percentage is calculated from consecutive `/proc/stat` counters, so the probe does not sleep remotely. Infrastructure collection is separately cached because Docker and mount inspection are more expensive.

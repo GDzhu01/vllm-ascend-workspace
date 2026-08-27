@@ -40,6 +40,15 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(heatmap[0]["devices"][0]["utilization_percent"], 75)
         self.assertEqual(heatmap[0]["devices"][1]["hbm_percent"], 10)
 
+        self.assertTrue(self.db.update_server(server["id"], tags=["A3", "训练"]))
+        updated = self.db.get_server(server["id"])
+        self.assertEqual(updated["tags"], ["A3", "训练"])
+        self.assertTrue(updated["enabled"])
+        self.assertTrue(self.db.update_server(server["id"], enabled=False))
+        disabled = self.db.get_server(server["id"])
+        self.assertFalse(disabled["enabled"])
+        self.assertEqual(disabled["tags"], ["A3", "训练"])
+
 
 if __name__ == "__main__":
     unittest.main()

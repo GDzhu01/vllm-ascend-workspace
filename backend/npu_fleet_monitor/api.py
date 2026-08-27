@@ -23,6 +23,20 @@ RANGES = {
 }
 
 
+def normalize_tags(value: Any) -> list[str]:
+    if not isinstance(value, list) or len(value) > 20 or not all(isinstance(tag, str) for tag in value):
+        raise ValueError("tags 必须是最多包含 20 个字符串的数组")
+    tags: list[str] = []
+    seen: set[str] = set()
+    for value_tag in value:
+        tag = value_tag.strip()[:60]
+        key = tag.casefold()
+        if tag and key not in seen:
+            tags.append(tag)
+            seen.add(key)
+    return tags
+
+
 class App:
     def __init__(self, settings: Settings, db: Database, adapter: WorkspaceDeviceAdapter, scheduler: AdaptiveScheduler) -> None:
         self.settings = settings
@@ -180,9 +194,19 @@ class Handler(BaseHTTPRequestHandler):
             server = re.fullmatch(r"/api/servers/([^/]+)", parsed.path)
             if server:
                 body = self.json_body()
-                if not self.app.db.set_server_enabled(server.group(1), bool(body.get("enabled"))):
+                enabled = None
+                tags = None
+                if "enabled" in body:
+                    if not isinstance(body["enabled"], bool):
+                        raise ValueError("enabled 必须是布尔值")
+                    enabled = body["enabled"]
+                if "tags" in body:
+                    tags = normalize_tags(body["tags"])
+                if enabled is None and tags is None:
+                    raise ValueError("至少提供 enabled 或 tags")
+                if not self.app.db.update_server(server.group(1), enabled=enabled, tags=tags):
                     return self.json_response({"error": "server not found"}, HTTPStatus.NOT_FOUND)
-                return self.json_response({"ok": True})
+                return self.json_response({"ok": True, "server": self.app.db.get_server(server.group(1))})
         except ValueError as exc:
             return self.json_response({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         self.json_response({"error": "not found"}, HTTPStatus.NOT_FOUND)
@@ -218,7 +242,7 @@ class Handler(BaseHTTPRequestHandler):
                 server = self.app.db.upsert_server({
                     "id": uuid.uuid4().hex, "name": str(entry.get("name") or host).strip()[:120],
                     "host": host, "port": port, "username": username,
-                    "tags": [str(tag)[:60] for tag in entry.get("tags", [])][:20],
+                    "tags": normalize_tags(entry.get("tags", [])),
                 })
                 auth = self.app.adapter.bootstrap_with_passwords(server, passwords)
                 if auth["ok"]:

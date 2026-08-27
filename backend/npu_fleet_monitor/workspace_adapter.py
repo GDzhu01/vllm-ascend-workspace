@@ -14,6 +14,7 @@ from typing import Any
 
 HOST_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-]+$")
 USER_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]+$")
+LOW_PRIORITY_TAG = "低优先级"
 
 
 class WorkspaceDeviceAdapter:
@@ -218,7 +219,9 @@ class WorkspaceDeviceAdapter:
 
     def discover_workspace_servers(self) -> list[dict[str, Any]]:
         candidates: list[Path] = []
+        workspace_roots: list[Path] = []
         if self.workspace_root:
+            workspace_roots.append(self.workspace_root)
             candidates.append(self.workspace_root / ".vaws-local" / "machine-inventory.json")
             try:
                 result = subprocess.run(
@@ -229,6 +232,7 @@ class WorkspaceDeviceAdapter:
                     common = Path(result.stdout.strip())
                     if not common.is_absolute():
                         common = (self.workspace_root / common).resolve()
+                    workspace_roots.append(common.parent)
                     candidates.append(common.parent / ".vaws-local" / "machine-inventory.json")
             except (OSError, subprocess.TimeoutExpired):
                 pass
@@ -261,7 +265,43 @@ class WorkspaceDeviceAdapter:
                 servers.append({
                     "name": str(machine.get("alias") or host), "host": host, "port": port,
                     "username": username, "tags": [str(machine_type)] if machine_type else [],
-                    "inventory_path": str(path),
+                    "inventory_path": str(path), "workspace_enabled": True,
+                })
+
+        # hosts.txt is the workspace's complete host pool. It may contain
+        # additional authentication columns; only the first address field is
+        # read here. Hosts absent from the active machine inventory remain
+        # monitorable, but are clearly marked as low priority.
+        seen_roots: set[Path] = set()
+        for root in workspace_roots:
+            root = root.resolve()
+            if root in seen_roots:
+                continue
+            seen_roots.add(root)
+            hosts_path = root / "hosts.txt"
+            if not hosts_path.is_file():
+                continue
+            try:
+                lines = hosts_path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                host = stripped.split(maxsplit=1)[0]
+                endpoint = (host, 22, "root")
+                if endpoint in seen_endpoints:
+                    continue
+                try:
+                    self.validate_endpoint(*endpoint)
+                except ValueError:
+                    continue
+                seen_endpoints.add(endpoint)
+                servers.append({
+                    "name": host, "host": host, "port": 22, "username": "root",
+                    "tags": [LOW_PRIORITY_TAG], "workspace_enabled": False,
+                    "inventory_path": str(hosts_path),
                 })
         return servers
 

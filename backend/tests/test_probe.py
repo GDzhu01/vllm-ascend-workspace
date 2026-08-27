@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from unittest import mock
@@ -83,6 +84,37 @@ class ProbeTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"NFM_SOURCE_WORKSPACE": str(workspace)}):
                 adapter = WorkspaceDeviceAdapter(project, Path(state))
             self.assertEqual(adapter.workspace_root, workspace)
+
+    def test_workspace_discovery_includes_disabled_hosts_without_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as state:
+            workspace = Path(root)
+            (workspace / ".agents/skills/machine-management").mkdir(parents=True)
+            inventory_dir = workspace / ".vaws-local"
+            inventory_dir.mkdir()
+            (inventory_dir / "machine-inventory.json").write_text(json.dumps({
+                "machines": [{
+                    "alias": "active-a3",
+                    "host": {"ip": "10.0.0.1", "port": 22, "user": "root", "machine_type": "A3"},
+                }],
+            }), encoding="utf-8")
+            (workspace / "hosts.txt").write_text(
+                "10.0.0.1 active-password\n10.0.0.2 disabled-password\n",
+                encoding="utf-8",
+            )
+            project = workspace / "monitor"
+            project.mkdir()
+            with mock.patch.dict("os.environ", {"NFM_SOURCE_WORKSPACE": str(workspace)}):
+                adapter = WorkspaceDeviceAdapter(project, Path(state))
+                servers = adapter.discover_workspace_servers()
+
+            self.assertEqual(len(servers), 2)
+            active = next(server for server in servers if server["host"] == "10.0.0.1")
+            disabled = next(server for server in servers if server["host"] == "10.0.0.2")
+            self.assertTrue(active["workspace_enabled"])
+            self.assertEqual(active["tags"], ["A3"])
+            self.assertFalse(disabled["workspace_enabled"])
+            self.assertEqual(disabled["tags"], ["低优先级"])
+            self.assertNotIn("password", json.dumps(servers))
 
 
 if __name__ == "__main__":

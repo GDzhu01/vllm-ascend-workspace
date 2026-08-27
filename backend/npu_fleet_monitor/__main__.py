@@ -9,7 +9,7 @@ from .db import Database
 from .probe import HostProbe
 from .scheduler import AdaptiveScheduler
 from .settings import Settings
-from .workspace_adapter import WorkspaceDeviceAdapter
+from .workspace_adapter import LOW_PRIORITY_TAG, WorkspaceDeviceAdapter
 
 
 def main() -> None:
@@ -42,6 +42,18 @@ def main() -> None:
             if server_record is None:
                 token = "|".join(map(str, endpoint)).encode()
                 server_record = db.upsert_server({**item, "id": hashlib.sha256(token).hexdigest()[:32]})
+            else:
+                tags = [tag for tag in server_record.get("tags", []) if tag != LOW_PRIORITY_TAG]
+                for tag in item.get("tags", []):
+                    if tag == LOW_PRIORITY_TAG:
+                        continue
+                    if tag not in tags:
+                        tags.append(tag)
+                if not item.get("workspace_enabled", True):
+                    tags.append(LOW_PRIORITY_TAG)
+                if tags != server_record.get("tags", []):
+                    db.update_server(server_record["id"], tags=tags)
+                    server_record = {**server_record, "tags": tags}
             auth = adapter.bootstrap_with_passwords(server_record, [])
             if auth.get("ok"):
                 scheduler.collect_now(server_record["id"])

@@ -122,9 +122,27 @@ class Database:
         return self._server(row)
 
     def set_server_enabled(self, server_id: str, enabled: bool) -> bool:
+        return self.update_server(server_id, enabled=enabled)
+
+    def update_server(
+        self,
+        server_id: str,
+        *,
+        enabled: bool | None = None,
+        tags: list[str] | None = None,
+    ) -> bool:
+        assignments = ["updated_at=?"]
+        values: list[Any] = [int(time.time())]
+        if enabled is not None:
+            assignments.append("enabled=?")
+            values.append(int(enabled))
+        if tags is not None:
+            assignments.append("tags_json=?")
+            values.append(json.dumps(tags, ensure_ascii=False))
+        values.append(server_id)
         cursor = self.connection().execute(
-            "UPDATE servers SET enabled=?, updated_at=? WHERE id=?",
-            (int(enabled), int(time.time()), server_id),
+            f"UPDATE servers SET {', '.join(assignments)} WHERE id=?",
+            values,
         )
         self.connection().commit()
         return cursor.rowcount > 0
