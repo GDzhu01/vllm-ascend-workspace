@@ -24,7 +24,7 @@ def main() -> int:
     env["PYTHONPATH"] = str(ROOT / "backend") + os.pathsep + env.get("PYTHONPATH", "")
     npm_command = "npm.cmd" if os.name == "nt" else "npm"
     children = [
-        subprocess.Popen([sys.executable, "-m", "npu_fleet_monitor"], cwd=ROOT, env=env),
+        subprocess.Popen([sys.executable, "-u", "-m", "npu_fleet_monitor"], cwd=ROOT, env=env),
         subprocess.Popen(
             [npm_command, "run", "start", "--", "--hostname", env["NFM_BIND"], "--port", env["NFM_WEB_PORT"]],
             cwd=ROOT,
