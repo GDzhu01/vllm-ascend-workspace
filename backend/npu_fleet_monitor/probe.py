@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 import subprocess
@@ -29,6 +30,24 @@ printf '__NFM_SECTION__mounts\n'; if command -v findmnt >/dev/null 2>&1; then fi
 printf '__NFM_SECTION__docker\n'; if command -v docker >/dev/null 2>&1; then docker ps --no-trunc --format '{{json .}}' 2>&1; else printf 'unavailable\n'; fi
 printf '__NFM_SECTION__docker_stats\n'; if command -v docker >/dev/null 2>&1; then timeout 10 docker stats --no-stream --format '{{json .}}' 2>/dev/null; fi
 printf '__NFM_SECTION__docker_info\n'; if command -v docker >/dev/null 2>&1; then docker info --format '{{json .}}' 2>/dev/null; fi
+'''
+
+PROCESS_DETAIL_SCRIPT = r'''set +e
+nfm_b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
+printf '__NFM_SECTION__process_details\n'
+for nfm_pid in __NFM_PIDS__; do
+    [ -d "/proc/$nfm_pid" ] || continue
+    nfm_user="$(stat -c '%U' "/proc/$nfm_pid" 2>/dev/null)"
+    nfm_cwd="$(readlink "/proc/$nfm_pid/cwd" 2>/dev/null)"
+    nfm_exe="$(readlink "/proc/$nfm_pid/exe" 2>/dev/null)"
+    nfm_name="$(cat "/proc/$nfm_pid/comm" 2>/dev/null)"
+    nfm_cmdline="$(tr '\000' ' ' < "/proc/$nfm_pid/cmdline" 2>/dev/null)"
+    nfm_cgroup="$(cat "/proc/$nfm_pid/cgroup" 2>/dev/null)"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$nfm_pid" "$(nfm_b64 "$nfm_user")" "$(nfm_b64 "$nfm_cwd")" \
+        "$(nfm_b64 "$nfm_cmdline")" "$(nfm_b64 "$nfm_exe")" \
+        "$(nfm_b64 "$nfm_name")" "$(nfm_b64 "$nfm_cgroup")"
+done
 '''
 
 
@@ -164,6 +183,91 @@ def parse_docker(text: str, stats_text: str = "", info_text: str = "") -> dict[s
     return {"available": error is None, "containers": containers, "running": len(containers), "info": info, "error": error}
 
 
+def build_process_detail_script(pids: list[int]) -> str:
+    safe_pids = " ".join(str(pid) for pid in sorted(set(pids)) if pid > 0)
+    return PROCESS_DETAIL_SCRIPT.replace("__NFM_PIDS__", safe_pids) + "\nexit 0\n"
+
+
+def _decode_process_field(value: str) -> str | None:
+    if not value:
+        return None
+    try:
+        decoded = base64.b64decode(value).decode("utf-8", errors="replace").strip()
+    except (ValueError, TypeError):
+        return None
+    return decoded or None
+
+
+def extract_container_id(cgroup: str | None) -> str | None:
+    if not cgroup:
+        return None
+    match = re.search(r"\b([0-9a-f]{64})\b", cgroup, re.IGNORECASE)
+    return match.group(1).lower() if match else None
+
+
+def parse_process_details(text: str) -> dict[int, dict[str, Any]]:
+    details: dict[int, dict[str, Any]] = {}
+    for line in text.splitlines():
+        cells = line.split("\t")
+        if len(cells) != 7 or not cells[0].isdigit():
+            continue
+        user, cwd, command, executable, name, cgroup = (_decode_process_field(value) for value in cells[1:])
+        pid = int(cells[0])
+        details[pid] = {
+            "pid": pid,
+            "name": name,
+            "user": user,
+            "cwd": cwd,
+            "command": command,
+            "executable": executable,
+            "container_id": extract_container_id(cgroup),
+        }
+    return details
+
+
+def attach_process_details(
+    devices: list[dict[str, Any]],
+    details: dict[int, dict[str, Any]],
+    docker: dict[str, Any],
+) -> None:
+    containers = docker.get("containers") or []
+    by_id = {
+        str(container.get("id") or "").lower(): container
+        for container in containers
+        if container.get("id")
+    }
+    for device in devices:
+        enriched = []
+        for record in device.get("processes") or []:
+            pid = int(record["pid"])
+            detail = details.get(pid) or {}
+            container_id = str(detail.get("container_id") or "").lower()
+            container = None
+            if container_id:
+                match = next(
+                    (item for item_id, item in by_id.items() if item_id == container_id or item_id.startswith(container_id) or container_id.startswith(item_id)),
+                    None,
+                )
+                container = {
+                    "id": (match or {}).get("id") or container_id,
+                    "short_id": container_id[:12],
+                    "name": (match or {}).get("name"),
+                    "image": (match or {}).get("image"),
+                    "status": (match or {}).get("status"),
+                    "source": "cgroup" if match else "cgroup-unmatched",
+                }
+            enriched.append({
+                **record,
+                "name": detail.get("name") or record.get("npu_process_name"),
+                "user": detail.get("user"),
+                "cwd": detail.get("cwd"),
+                "command": detail.get("command"),
+                "executable": detail.get("executable"),
+                "container": container,
+            })
+        device["processes"] = enriched
+
+
 def attach_npu_telemetry(devices: list[dict[str, Any]], info: str) -> None:
     details: dict[int, dict[str, float | str]] = {}
     for line in info.splitlines():
@@ -195,7 +299,25 @@ class HostProbe:
         self.hbm_busy_threshold_mb = hbm_busy_threshold_mb
         self._cpu_counters: dict[str, tuple[int, int]] = {}
         self._infra_cache: dict[str, dict[str, Any]] = {}
+        self._process_cache: dict[str, dict[int, dict[str, Any]]] = {}
         self._preflighted: set[str] = set()
+
+    def _collect_process_details(self, server: dict[str, Any], pids: list[int]) -> dict[int, dict[str, Any]]:
+        if not pids:
+            return {}
+        try:
+            result = subprocess.run(
+                [*self.adapter.ssh_base(server), "bash", "-s"],
+                input=build_process_detail_script(pids),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                timeout=min(self.timeout, 15), check=False,
+                cwd=self.adapter.project_root,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return {}
+        if result.returncode != 0:
+            return {}
+        return parse_process_details(split_sections(result.stdout).get("process_details", ""))
 
     def collect(self, server: dict[str, Any], include_infrastructure: bool) -> dict[str, Any]:
         started = time.monotonic()
@@ -217,7 +339,6 @@ class HostProbe:
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"SSH 探查超时（{exc.timeout:g}s）") from exc
-        duration_ms = round((time.monotonic() - started) * 1000)
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout or "SSH 探查失败")[-1200:])
         sections = split_sections(result.stdout)
@@ -251,6 +372,18 @@ class HostProbe:
         else:
             infrastructure = self._infra_cache.get(server_id, {"disks": [], "mounts": [], "docker": {"available": None, "containers": [], "running": None}})
 
+        active_pids = sorted({
+            int(process["pid"])
+            for device in devices
+            for process in (device.get("processes") or [])
+            if int(process.get("pid") or 0) > 0
+        })
+        process_cache = self._process_cache.setdefault(server_id, {})
+        stale_pids = active_pids if include_infrastructure else [pid for pid in active_pids if pid not in process_cache]
+        process_cache.update(self._collect_process_details(server, stale_pids))
+        self._process_cache[server_id] = {pid: process_cache[pid] for pid in active_pids if pid in process_cache}
+        attach_process_details(devices, self._process_cache[server_id], infrastructure["docker"])
+
         hbm_used = sum(int((device.get("hbm") or {}).get("used_mb") or 0) for device in devices)
         hbm_total = sum(int((device.get("hbm") or {}).get("total_mb") or 0) for device in devices)
         utils = [float(device["aicore_percent"]) for device in devices if device.get("aicore_percent") is not None]
@@ -264,6 +397,7 @@ class HostProbe:
             "docker_running": infrastructure["docker"].get("running"),
             "disk_max_percent": max((disk["used_percent"] for disk in disks), default=None),
         }
+        duration_ms = round((time.monotonic() - started) * 1000)
         return {
             "server_id": server_id, "collected_at": int(time.time()), "duration_ms": duration_ms,
             "hostname": sections.get("hostname") or server["name"], "summary": summary,

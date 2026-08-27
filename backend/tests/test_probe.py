@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import tempfile
 import unittest
@@ -8,11 +9,14 @@ from pathlib import Path
 
 from npu_fleet_monitor.probe import (
     attach_npu_telemetry,
+    attach_process_details,
+    build_process_detail_script,
     cpu_percent,
     is_device_busy,
     parse_disks,
     parse_docker,
     parse_meminfo,
+    parse_process_details,
     split_sections,
 )
 from npu_fleet_monitor.workspace_adapter import WorkspaceDeviceAdapter
@@ -49,6 +53,27 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(is_device_busy({**idle, "aicore_percent": 2}, 8192))
         self.assertTrue(is_device_busy({**idle, "hbm": {"used_mb": 8192}}, 8192))
         self.assertTrue(is_device_busy({**idle, "processes": [{"pid": 1}]}, 8192))
+
+    def test_process_details_are_decoded_and_attached_to_container(self) -> None:
+        encoded = lambda value: base64.b64encode(value.encode()).decode()
+        container_id = "a" * 64
+        details = parse_process_details("\t".join([
+            "421", encoded("root"), encoded("/workspace"), encoded("python -m vllm.entrypoints.openai.api_server"),
+            encoded("/usr/bin/python3"), encoded("python3"), encoded(f"0::/system.slice/docker-{container_id}.scope"),
+        ]))
+        devices = [{"processes": [{"pid": 421, "npu_process_name": "python3", "npu_memory_mb": 2048}]}]
+        attach_process_details(devices, details, {"containers": [{"id": container_id, "name": "vllm-a3", "image": "vllm:latest", "status": "Up"}]})
+        process = devices[0]["processes"][0]
+        self.assertEqual(process["cwd"], "/workspace")
+        self.assertEqual(process["command"], "python -m vllm.entrypoints.openai.api_server")
+        self.assertEqual(process["container"]["name"], "vllm-a3")
+        self.assertEqual(process["npu_memory_mb"], 2048)
+
+    def test_process_detail_script_only_contains_validated_pids(self) -> None:
+        script = build_process_detail_script([23, 7, 23, -1])
+        self.assertIn("for nfm_pid in 7 23; do", script)
+        self.assertIn('/proc/$nfm_pid/cmdline', script)
+        self.assertIn('/proc/$nfm_pid/cwd', script)
 
     def test_workspace_npu_parser_is_reused(self) -> None:
         with tempfile.TemporaryDirectory() as state:
