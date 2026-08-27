@@ -337,8 +337,8 @@ class HostProbe:
         try:
             result = subprocess.run(
                 [*self.adapter.ssh_base(server), "bash", "-s"],
-                input=build_process_detail_script(pids),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                input=build_process_detail_script(pids).encode("utf-8"),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 timeout=min(self.timeout, 15), check=False,
                 cwd=self.adapter.project_root,
             )
@@ -346,7 +346,7 @@ class HostProbe:
             return {}
         if result.returncode != 0:
             return {}
-        return parse_process_details(split_sections(result.stdout).get("process_details", ""))
+        return parse_process_details(split_sections(result.stdout.decode("utf-8", errors="replace")).get("process_details", ""))
 
     def collect(self, server: dict[str, Any], include_infrastructure: bool) -> dict[str, Any]:
         started = time.monotonic()
@@ -361,16 +361,17 @@ class HostProbe:
         script = FAST_SCRIPT + (INFRA_SCRIPT if include_infrastructure else "") + "\nexit 0\n"
         try:
             result = subprocess.run(
-                [*self.adapter.ssh_base(server), "bash", "-s"], input=script,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                [*self.adapter.ssh_base(server), "bash", "-s"], input=script.encode("utf-8"),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 timeout=self.timeout + (12 if include_infrastructure else 0), check=False,
                 cwd=self.adapter.project_root,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"SSH 探查超时（{exc.timeout:g}s）") from exc
         if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout or "SSH 探查失败")[-1200:])
-        sections = split_sections(result.stdout)
+            detail = (result.stderr or result.stdout or b"SSH probe failed").decode("utf-8", errors="replace")
+            raise RuntimeError(detail[-1200:])
+        sections = split_sections(result.stdout.decode("utf-8", errors="replace"))
         if not sections.get("proc_stat"):
             raise RuntimeError("远程探查结果不完整：缺少 /proc/stat")
         if sections.get("npu_info_rc") not in (None, "0"):

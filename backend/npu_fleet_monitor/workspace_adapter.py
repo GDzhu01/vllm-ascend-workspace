@@ -103,8 +103,7 @@ class WorkspaceDeviceAdapter:
     def ssh_base(self, server: dict[str, Any], *, batch_mode: bool = True) -> list[str]:
         self.validate_endpoint(server["host"], int(server["port"]), server["username"])
         self.ensure_key()
-        control_path = Path("data") / "ssh-control" / "%C"
-        return [
+        command = [
             "ssh", "-T",
             "-o", f"BatchMode={'yes' if batch_mode else 'no'}",
             "-o", "StrictHostKeyChecking=accept-new",
@@ -114,14 +113,20 @@ class WorkspaceDeviceAdapter:
             "-o", "ConnectionAttempts=1",
             "-o", "ServerAliveInterval=10",
             "-o", "ServerAliveCountMax=1",
-            "-o", "ControlMaster=auto",
-            "-o", "ControlPersist=90",
-            "-o", f"ControlPath={control_path}",
             "-i", str(self.private_key),
             "-o", "IdentitiesOnly=yes",
             "-p", str(server["port"]),
             f"{server['username']}@{server['host']}",
         ]
+        if os.name != "nt":
+            control_path = Path("data") / "ssh-control" / "%C"
+            identity_index = command.index("-i")
+            command[identity_index:identity_index] = [
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPersist=90",
+                "-o", f"ControlPath={control_path}",
+            ]
+        return command
 
     def preflight(self, server: dict[str, Any]) -> dict[str, Any]:
         self.validate_endpoint(server["host"], int(server["port"]), server["username"])
@@ -173,8 +178,8 @@ class WorkspaceDeviceAdapter:
                 f"grep -qxF {quoted} ~/.ssh/authorized_keys 2>/dev/null || printf '%s\\n' {quoted} >> ~/.ssh/authorized_keys"
             )
             install = subprocess.run(
-                [*self._default_key_base(server), "sh", "-c", shlex.quote(remote)], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=15, check=False,
+                [*self._default_key_base(server), "sh", "-s"], input=(remote + "\n").encode("utf-8"),
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15, check=False,
                 cwd=self.project_root,
             )
             return install.returncode == 0 and self.key_auth_works(server)

@@ -22,10 +22,11 @@ def main() -> int:
         env.pop(name, None)
     env["NO_PROXY"] = "127.0.0.1,localhost"
     env["PYTHONPATH"] = str(ROOT / "backend") + os.pathsep + env.get("PYTHONPATH", "")
+    npm_command = "npm.cmd" if os.name == "nt" else "npm"
     children = [
         subprocess.Popen([sys.executable, "-m", "npu_fleet_monitor"], cwd=ROOT, env=env),
         subprocess.Popen(
-            ["npm", "run", "start", "--", "--hostname", env["NFM_BIND"], "--port", env["NFM_WEB_PORT"]],
+            [npm_command, "run", "start", "--", "--hostname", env["NFM_BIND"], "--port", env["NFM_WEB_PORT"]],
             cwd=ROOT,
             env=env,
         ),

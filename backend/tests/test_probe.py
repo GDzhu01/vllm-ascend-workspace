@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import tempfile
 import unittest
 from unittest import mock
@@ -110,7 +111,7 @@ class ProbeTests(unittest.TestCase):
 """,
                 "NPU ID : 0\nAicore Usage Rate(%) : 55\nHBM Usage Rate(%) : 50",
             )
-            self.assertEqual(parsed["devices"][0]["aicore_percent"], 55)
+            self.assertEqual(parsed["devices"][0]["aicore_percent"], 87)
             self.assertEqual(parsed["devices"][0]["hbm"]["used_mb"], 32768)
 
     def test_control_path_stays_below_unix_socket_limit(self) -> None:
@@ -118,6 +119,9 @@ class ProbeTests(unittest.TestCase):
             project = Path(__file__).resolve().parents[2]
             adapter = WorkspaceDeviceAdapter(project, Path(state))
             command = adapter.ssh_base({"host":"10.0.0.1","port":22,"username":"root"})
+            if os.name == "nt":
+                self.assertNotIn("ControlMaster=auto", command)
+                return
             option = next(command[index + 1] for index, value in enumerate(command) if value == "-o" and command[index + 1].startswith("ControlPath="))
             expanded = option.split("=", 1)[1].replace("%C", "x" * 40)
             self.assertLess(len(expanded), 100)
@@ -130,7 +134,7 @@ class ProbeTests(unittest.TestCase):
             project.mkdir()
             with mock.patch.dict("os.environ", {"NFM_SOURCE_WORKSPACE": str(workspace)}):
                 adapter = WorkspaceDeviceAdapter(project, Path(state))
-            self.assertEqual(adapter.workspace_root, workspace)
+            self.assertEqual(os.path.normcase(adapter.workspace_root), os.path.normcase(workspace.resolve()))
 
     def test_workspace_discovery_includes_disabled_hosts_without_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as state:

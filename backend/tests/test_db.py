@@ -15,6 +15,7 @@ class DatabaseTests(unittest.TestCase):
         self.db.initialize()
 
     def tearDown(self) -> None:
+        self.db.close()
         self.temp.cleanup()
 
     def test_server_sample_and_history(self) -> None:

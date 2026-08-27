@@ -24,6 +24,7 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(scheduler.effective_interval(), 10)
             scheduler.heartbeat("viewer_00000001", 10, False)
             self.assertEqual(scheduler.effective_interval(), 120)
+            db.close()
 
 
 if __name__ == "__main__":
