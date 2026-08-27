@@ -12,6 +12,7 @@ from npu_fleet_monitor.probe import (
     attach_process_details,
     build_process_detail_script,
     cpu_percent,
+    extract_ownership_labels,
     is_device_busy,
     parse_disks,
     parse_docker,
@@ -74,6 +75,27 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("for nfm_pid in 7 23; do", script)
         self.assertIn('/proc/$nfm_pid/cmdline', script)
         self.assertIn('/proc/$nfm_pid/cwd', script)
+
+    def test_ownership_labels_extract_employee_ids_and_initials(self) -> None:
+        labels = extract_ownership_labels(
+            "/home/q00946761/workspace/wbj/project/abc1234567",
+            "wbj_dsa_op_q00946761",
+        )
+        by_kind = {
+            kind: [label["value"] for label in labels if label["kind"] == kind]
+            for kind in ("employee_id", "initials")
+        }
+        self.assertEqual(by_kind["employee_id"], ["q00946761", "abc1234567"])
+        self.assertEqual(by_kind["initials"], ["wbj", "dsa", "op"])
+        q_label = next(label for label in labels if label["value"] == "q00946761")
+        self.assertEqual(q_label["sources"], ["pwd", "container"])
+
+    def test_ownership_label_boundaries_reject_overlong_candidates(self) -> None:
+        labels = extract_ownership_labels(
+            "/home/abcd1234567/a1234567890/abcde/team",
+            None,
+        )
+        self.assertEqual(labels, [{"value": "team", "kind": "initials", "sources": ["pwd"]}])
 
     def test_workspace_npu_parser_is_reused(self) -> None:
         with tempfile.TemporaryDirectory() as state:

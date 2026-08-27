@@ -9,6 +9,7 @@ type Chip = {
   aicore_percent?: number;
   hbm?: { used_mb?: number; total_mb?: number };
 };
+type OwnershipLabel = { value: string; kind: 'employee_id' | 'initials'; sources?: Array<'pwd' | 'container'> };
 type NpuProcess = {
   pid: number;
   name?: string;
@@ -19,6 +20,7 @@ type NpuProcess = {
   command?: string;
   executable?: string;
   container?: { id?: string; short_id?: string; name?: string; image?: string; status?: string; source?: string };
+  ownership_labels?: OwnershipLabel[];
 };
 type Device = {
   npu_id: number;
@@ -73,6 +75,35 @@ function dateKey(timestamp: number) { const date = new Date(timestamp * 1000); r
 function average(points: HistoryPoint[], key: MetricKey) { const values = points.map((point) => point[key]).filter((value): value is number => value != null && Number.isFinite(value)); return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null; }
 
 function StatusDot({ status }: { status: string }) { return <span className={`status-dot status-dot--${status}`} aria-hidden="true" />; }
+
+function CopyButton({ value, label = '复制', className = '' }: { value: string; label?: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy(event: React.MouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const legacyCopy = () => {
+      const input = document.createElement('textarea');
+      input.value = value;
+      input.style.position = 'fixed';
+      input.style.opacity = '0';
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      input.remove();
+    };
+    try {
+      if (navigator.clipboard) await navigator.clipboard.writeText(value);
+      else legacyCopy();
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      legacyCopy();
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    }
+  }
+  return <button type="button" className={`copy-button ${className}`} onClick={copy} title={`复制：${value}`} aria-label={`复制 ${value}`}>{copied ? '已复制' : label}</button>;
+}
 
 function dieColor(hbmPercent: number | null) {
   const ratio = Math.min(1, clampPercent(hbmPercent) / 50);
@@ -267,7 +298,9 @@ function NpuProcessPanel({ devices }: { devices: Device[] }) {
   return <section className="panel process-panel"><header className="panel-heading"><div><p className="section-kicker">NPU workloads</p><h2>NPU 进程归属</h2><span>默认显示所属容器；展开查看 PID、PWD 与完整启动命令</span></div><span className="status-label status-label--busy">{processes.length} 个进程</span></header><div className="process-groups">{groups.map(({ container, processes: containerProcesses }) => {
     const label = container?.name || container?.short_id || '宿主机进程';
     const npuIds = Array.from(new Set(containerProcesses.flatMap((process) => process.npuIds))).sort((a, b) => a - b);
-    return <details className="process-group" key={container?.id || label}><summary><span className={`process-container-icon ${container ? 'is-container' : ''}`}>▣</span><span><strong>{label}</strong><small>{containerProcesses.length} 个进程 · NPU {npuIds.join(', ')}</small></span><i>›</i></summary><div className="process-details">{containerProcesses.sort((a, b) => a.pid - b.pid).map((process) => <article key={process.pid}><header><strong>{process.name || process.npu_process_name || '未知进程'}</strong><span>PID {process.pid} · {process.user || '未知用户'} · NPU {process.npuIds.join(', ')}</span></header><dl><div><dt>PWD</dt><dd><code>{process.cwd || '无法读取'}</code></dd></div><div><dt>启动命令</dt><dd><code>{process.command || process.npu_process_name || '无法读取'}</code></dd></div>{process.executable && <div><dt>可执行文件</dt><dd><code>{process.executable}</code></dd></div>}{container?.image && <div><dt>容器镜像</dt><dd><code>{container.image}</code></dd></div>}</dl></article>)}</div></details>;
+    const ownershipLabels = Array.from(new Map(containerProcesses.flatMap((process) => process.ownership_labels || []).map((item) => [`${item.kind}:${item.value.toLowerCase()}`, item])).values());
+    const copyableLabels = ownershipLabels.map((item) => item.value).join(' ');
+    return <details className="process-group" key={container?.id || label}><summary><span className={`process-container-icon ${container ? 'is-container' : ''}`}>▣</span><span><strong className="process-container-name">{label}</strong><small>{containerProcesses.length} 个进程 · NPU {npuIds.join(', ')}</small></span><span className="process-summary-actions"><CopyButton value={label} label="复制容器" /><i>›</i></span></summary>{ownershipLabels.length > 0 && <div className="ownership-labels"><span>归属标签</span><div>{ownershipLabels.map((item) => <CopyButton key={`${item.kind}:${item.value}`} value={item.value} label={`${item.kind === 'employee_id' ? '工号' : '缩写?'} · ${item.value}`} className={`ownership-chip ownership-chip--${item.kind}`} />)}<CopyButton value={copyableLabels} label="复制全部" className="copy-all-labels" /></div></div>}<div className="process-details">{containerProcesses.sort((a, b) => a.pid - b.pid).map((process) => <article key={process.pid}><header><strong>{process.name || process.npu_process_name || '未知进程'}</strong><span>PID {process.pid} · {process.user || '未知用户'} · NPU {process.npuIds.join(', ')}</span></header><dl><div><dt>所属容器</dt><dd className="copy-value"><code>{label}</code><CopyButton value={label} /></dd></div><div><dt>PWD</dt><dd className="copy-value"><code>{process.cwd || '无法读取'}</code>{process.cwd && <CopyButton value={process.cwd} />}</dd></div><div><dt>启动命令</dt><dd><code>{process.command || process.npu_process_name || '无法读取'}</code></dd></div>{process.executable && <div><dt>可执行文件</dt><dd><code>{process.executable}</code></dd></div>}{container?.image && <div><dt>容器镜像</dt><dd><code>{container.image}</code></dd></div>}</dl></article>)}</div></details>;
   })}</div></section>;
 }
 

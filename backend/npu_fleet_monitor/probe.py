@@ -11,6 +11,13 @@ from .workspace_adapter import WorkspaceDeviceAdapter
 
 
 SECTION = "__NFM_SECTION__"
+EMPLOYEE_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{1,3}\d{7,9})(?![A-Za-z0-9])")
+INITIALS_PATTERN = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{2,4})(?![A-Za-z0-9])")
+INITIALS_STOP_WORDS = {
+    "app", "bin", "data", "dev", "etc", "home", "lib", "log", "logs", "mnt",
+    "opt", "proc", "root", "run", "src", "sys", "test", "tmp", "usr", "var",
+    "vllm", "work",
+}
 FAST_SCRIPT = r'''set +e
 if [ -f /etc/profile.d/vaws-ascend-env.sh ]; then . /etc/profile.d/vaws-ascend-env.sh >/dev/null 2>&1; fi
 export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64:${LD_LIBRARY_PATH:-}
@@ -205,6 +212,25 @@ def extract_container_id(cgroup: str | None) -> str | None:
     return match.group(1).lower() if match else None
 
 
+def extract_ownership_labels(cwd: str | None, container_name: str | None) -> list[dict[str, Any]]:
+    sources = (("pwd", cwd), ("container", container_name))
+    labels: dict[tuple[str, str], dict[str, Any]] = {}
+    for kind, pattern in (("employee_id", EMPLOYEE_ID_PATTERN), ("initials", INITIALS_PATTERN)):
+        for source, text in sources:
+            if not text:
+                continue
+            for match in pattern.finditer(text):
+                value = match.group(1)
+                normalized = value.casefold()
+                if kind == "initials" and normalized in INITIALS_STOP_WORDS:
+                    continue
+                key = (kind, normalized)
+                label = labels.setdefault(key, {"value": value, "kind": kind, "sources": []})
+                if source not in label["sources"]:
+                    label["sources"].append(source)
+    return list(labels.values())
+
+
 def parse_process_details(text: str) -> dict[int, dict[str, Any]]:
     details: dict[int, dict[str, Any]] = {}
     for line in text.splitlines():
@@ -264,6 +290,9 @@ def attach_process_details(
                 "command": detail.get("command"),
                 "executable": detail.get("executable"),
                 "container": container,
+                "ownership_labels": extract_ownership_labels(
+                    detail.get("cwd"), (container or {}).get("name"),
+                ),
             })
         device["processes"] = enriched
 
