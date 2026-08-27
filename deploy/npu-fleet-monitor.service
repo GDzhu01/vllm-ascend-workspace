@@ -1,0 +1,20 @@
+[Unit]
+Description=Local Ascend NPU Fleet Monitor
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__NFM_PROJECT_ROOT__
+ExecStart=__NFM_PROJECT_ROOT__/scripts/start.sh
+Environment=NFM_BIND=127.0.0.1
+Environment=NFM_WEB_PORT=8788
+Environment=NFM_PORT=8789
+Environment=NFM_IDLE_INTERVAL_SECONDS=120
+Environment=NFM_HISTORY_INTERVAL_SECONDS=30
+Environment=NFM_INFRA_INTERVAL_SECONDS=60
+Environment=NFM_HBM_BUSY_THRESHOLD_MB=8192
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

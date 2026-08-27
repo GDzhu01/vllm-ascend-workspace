@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.next/
+.wrangler/
+data/
+*.log
+__pycache__/
+*.py[cod]
+.env
+.env.local
